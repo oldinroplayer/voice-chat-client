@@ -45,11 +45,7 @@ Change `127.0.0.1` to your voice server IP before building.
 
 ## Build
 
-Open `voice-dll.sln` in Visual Studio 2022 and build `Release | Win32`, or run:
-
-```powershell
-.\build.ps1
-```
+Open `voice-dll.sln` in Visual Studio 2022 and build `Release | Win32`.
 
 Output:
 
