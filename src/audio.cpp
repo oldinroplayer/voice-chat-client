@@ -695,6 +695,26 @@ void AudioPlayback::play_opus(int speaker_id, const uint8_t* opus_data,
     // the packet is older than what we've already seen (reorder; drop).
     int gap = 1; // default: treat first packet as no-loss
     if (sp->have_last_seq) {
+        // The sender resets tx_seq_ to 0 on every PTT release (set_ptt(false),
+        // set_mute, etc.) via reset_mic_pipeline_.  If the speaker has been
+        // silent for > 500 ms they almost certainly released PTT and started a
+        // fresh transmission — clear have_last_seq so the new stream is accepted
+        // immediately rather than being silently dropped until seq wraps past the
+        // old high-water mark (which takes up to ~22 minutes at 50 pkt/s).
+        {
+            DWORD now_ck = GetTickCount();
+            DWORD lr;
+            {
+                std::lock_guard<std::mutex> lk(sp->jmtx);
+                lr = sp->last_recv;
+            }
+            if (lr > 0 && (now_ck - lr) > 500) {
+                sp->have_last_seq = false;
+                sp->last_seq = 0;
+            }
+        }
+    }
+    if (sp->have_last_seq) {
         int16_t delta = static_cast<int16_t>(seq - sp->last_seq);
         if (delta <= 0) {
             // Stale / duplicate / reordered — ignore.
