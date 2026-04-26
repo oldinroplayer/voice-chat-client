@@ -59,7 +59,9 @@ constexpr uintptr_t ACCOUNT_ID = 0x011FB9A4;
 constexpr uintptr_t CHAR_ID    = 0x011FB9A8;
 ```
 
-Use `ro-mem-scanner` tool to find offsets for other client versions.
+Use [`tools/ro-mem-scanner.zip`](tools/ro-mem-scanner.zip) to find offsets for other client versions.
+
+> Run as **Administrator** while logged into a character on a map.
 
 ---
 
