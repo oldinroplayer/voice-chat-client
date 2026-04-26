@@ -65,6 +65,25 @@ Use [`tools/ro-mem-scanner.zip`](tools/ro-mem-scanner.zip) to find offsets for o
 
 ---
 
+## Injection
+
+Inject `voice-chat.dll` into the RO client process using any DLL injector.
+
+**Important:**
+- Inject **after** you are logged into a character on a map (not at the login or character select screen)
+- The overlay appears automatically once the DLL is loaded and connected
+- Press **Scroll Lock** to show/hide the overlay at any time
+
+**Verify it's working:**
+
+| Sign | Meaning |
+|------|---------|
+| Overlay appears in-game | DLL hooked successfully |
+| Overlay gone after Scroll Lock | Press Scroll Lock again to restore |
+| No overlay at all | DLL not injected, or injected too early (re-inject after entering a map) |
+
+---
+
 ## Build
 
 Open `voice-dll.sln` in Visual Studio 2022 and build `Release | Win32`.
