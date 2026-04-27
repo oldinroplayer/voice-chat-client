@@ -6,6 +6,7 @@ Built for use with [rathena-voice-chat](https://github.com/Sitecraft-Admin/rathe
 
 [![Website](https://img.shields.io/badge/Website-sitecraft.in.th-blue?style=for-the-badge)](https://sitecraft.in.th/)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Us-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.com/invite/aTkZw9ZrQ9)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/sitecraft)
 
 ---
 
