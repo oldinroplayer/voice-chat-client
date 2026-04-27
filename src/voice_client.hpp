@@ -208,6 +208,7 @@ private:
 
     std::wstring server_host_ = L"127.0.0.1";
     INTERNET_PORT server_port_ = 7000;
+    std::string  client_secret_ = "";
 
     // Whisper state
     WhisperState whisper_state_     = WhisperState::None;

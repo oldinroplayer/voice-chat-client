@@ -151,6 +151,7 @@ void VoiceClient::load_settings(const char* path) {
             else if (key == "vad")               vad_.set_enabled(val == "1");
             else if (key == "aec")               aec_.set_enabled(val == "1");
             else if (key == "loudness_norm")     playback_.set_loudness_norm(val == "1");
+            else if (key == "client_secret")     client_secret_ = val;
         } catch (...) {}
     }
     if (deafened_.load()) {
@@ -200,7 +201,8 @@ void VoiceClient::save_settings(const char* path) {
       << "agc: "                 << (agc_.is_enabled()               ? 1 : 0) << "\n"
       << "vad: "                 << (vad_.is_enabled()               ? 1 : 0) << "\n"
       << "aec: "                 << (aec_.is_enabled()               ? 1 : 0) << "\n"
-      << "loudness_norm: "       << (playback_.is_loudness_norm()    ? 1 : 0) << "\n";
+      << "loudness_norm: "       << (playback_.is_loudness_norm()    ? 1 : 0) << "\n"
+      << "client_secret: "      << client_secret_                           << "\n";
 
     dbglog("[cfg] settings saved");
 }
@@ -520,6 +522,7 @@ void VoiceClient::try_send_auth() {
     auth["char_id"]    = st.char_id;
     auth["session_id"] = g_voice_session_id;
     auth["hwid"]       = get_hwid();
+    auth["secret"]     = client_secret_;
 
     if (ws_.send_text(auth.dump())) {
         auth_sent_ = true;
