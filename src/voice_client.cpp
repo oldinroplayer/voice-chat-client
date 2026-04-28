@@ -340,7 +340,9 @@ void VoiceClient::enqueue_ws_send(std::string msg) {
 }
 
 void VoiceClient::init() {
-    if (running_) return;
+    bool expected = false;
+    if (!running_.compare_exchange_strong(expected, true))
+        return;
 
     // Start with the cleanest/rawest mic path by default.
     // Users who need extra cleanup can enable NS/AGC/VAD/AEC later from settings,
@@ -353,22 +355,26 @@ void VoiceClient::init() {
 
     load_settings();   // restore PTT key, gains, devices, channel etc.
 
-    running_ = true;
     auth_sent_      = false;
     auth_confirmed_ = false;
     if (g_voice_session_id == 0) g_voice_session_id = make_session_id();
     reconnecting_ = false;
     init_opus_encoder();
 
-    std::thread([this]{
+    if (init_thread_.joinable())
+        init_thread_.join();
+
+    init_thread_ = std::thread([this]{
         dbglog("bg: connect_to_server start");
         connect_to_server();
         dbglog("bg: connect_to_server done");
+        if (!running_.load()) return;
 
         if (!position_thread_.joinable()) {
             dbglog("bg: starting position_thread");
             position_thread_ = std::thread([this]{ position_loop(); });
         }
+        if (!running_.load()) return;
 
         // Register AEC reference tap so the render thread feeds its pre-pan
         // mono mix of decoded voices into the echo canceller. Capture then
@@ -377,33 +383,42 @@ void VoiceClient::init() {
             [this](const int16_t* pcm, size_t n) {
                 aec_.push_reference(pcm, n);
             });
+        if (!running_.load()) return;
 
         dbglog("bg: starting audio capture");
         bool ok = capture_.start([this](const std::vector<int16_t>& pcm){
             on_audio_captured(pcm);
         });
         dbglog(ok ? "bg: audio capture started OK" : "bg: audio capture FAILED");
-    }).detach();
+    });
 
     dbglog("VoiceClient::init returned (bg thread running)");
 }
 
 void VoiceClient::shutdown() {
-    running_        = false;
+    if (!running_.exchange(false) &&
+        !init_thread_.joinable() &&
+        !position_thread_.joinable())
+        return;
+
     reconnecting_   = false;
     auth_sent_      = false;
     auth_confirmed_ = false;
     reset_mic_pipeline_.store(true);
-    pcm_accum_.clear();
-    reset_mic_filter_state();
 
-    capture_.stop();
-    playback_.stop_all();
     ws_.disconnect();
-    destroy_opus_encoder();
+
+    if (init_thread_.joinable())
+        init_thread_.join();
 
     if (position_thread_.joinable())
         position_thread_.join();
+
+    capture_.stop();
+    playback_.stop_all();
+    pcm_accum_.clear();
+    reset_mic_filter_state();
+    destroy_opus_encoder();
 }
 
 void VoiceClient::on_ws_closed() {

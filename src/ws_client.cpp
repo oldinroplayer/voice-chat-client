@@ -16,12 +16,27 @@ std::wstring default_user_agent() {
 }
 
 bool WsClient::connect(const std::wstring& host, INTERNET_PORT port, const std::wstring& path) {
-    // Clean up any leftover handles from previous connection before reconnecting
-    if (websocket_) { WinHttpCloseHandle(websocket_); websocket_ = nullptr; }
+    std::lock_guard<std::mutex> conn_lock(conn_mtx_);
+
+    // Clean up any leftover handles from previous connection before reconnecting.
+    // Do not free the websocket handle until recv_thread has left WinHTTP.
+    connected_ = false;
+    HINTERNET old_ws = nullptr;
+    {
+        std::lock_guard<std::mutex> send_lock(send_mtx_);
+        old_ws = websocket_;
+        if (old_ws)
+            WinHttpWebSocketClose(old_ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+    }
+    if (recv_thread_.joinable()) recv_thread_.join();
+    {
+        std::lock_guard<std::mutex> send_lock(send_mtx_);
+        websocket_ = nullptr;
+    }
+    if (old_ws)     WinHttpCloseHandle(old_ws);
     if (request_)   { WinHttpCloseHandle(request_);   request_   = nullptr; }
     if (connect_)   { WinHttpCloseHandle(connect_);   connect_   = nullptr; }
     if (session_)   { WinHttpCloseHandle(session_);   session_   = nullptr; }
-    if (recv_thread_.joinable()) recv_thread_.join();
 
     dbglog("WinHttpOpen");
     const std::wstring user_agent = default_user_agent();
@@ -189,14 +204,20 @@ bool WsClient::send_binary(const std::vector<uint8_t>& data) {
 }
 
 void WsClient::disconnect() {
+    std::lock_guard<std::mutex> conn_lock(conn_mtx_);
+
     bool was_connected = connected_.exchange(false);
     if (!was_connected && !websocket_ && !request_ && !connect_ && !session_) return;
 
     dbglog("[ws] disconnect start");
 
-    HINTERNET ws = websocket_;
-    if (ws) {
-        WinHttpWebSocketClose(ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+    HINTERNET ws = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(send_mtx_);
+        ws = websocket_;
+        if (ws) {
+            WinHttpWebSocketClose(ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+        }
     }
 
     if (recv_thread_.joinable()) {

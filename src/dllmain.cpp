@@ -43,6 +43,9 @@ static bool g_initialized = false;
 // We don't check more often — process enumeration is expensive and visible
 // in profilers. 30 s is short enough to catch tools opened after injection.
 static std::atomic<bool> g_at_running{ false };
+static std::atomic<bool> g_shutdown_started{ false };
+static HANDLE g_at_thread = nullptr;
+static HANDLE g_main_thread = nullptr;
 
 static DWORD WINAPI AntiTamperThread(LPVOID) {
     // Initial check right at startup (catches tools that were already open
@@ -62,14 +65,18 @@ static DWORD WINAPI MainThread(LPVOID) {
 
     dbglog("MainThread started");
     Sleep(1000);
+    if (g_shutdown_started.load())
+        return 0;
 
     // Start anti-tamper monitor before any real work begins.
     g_at_running.store(true);
-    CreateThread(nullptr, 0, AntiTamperThread, nullptr, 0, nullptr);
+    g_at_thread = CreateThread(nullptr, 0, AntiTamperThread, nullptr, 0, nullptr);
 
     dbglog("Calling D3D9Hook::install");
     bool hook_ok = D3D9Hook::install();
     dbglog(hook_ok ? "D3D9Hook::install OK" : "D3D9Hook::install FAILED");
+    if (g_shutdown_started.load())
+        return 0;
 
     dbglog("Calling VoiceClient::init");
     VoiceClient::get().init();
@@ -78,21 +85,42 @@ static DWORD WINAPI MainThread(LPVOID) {
     return 0;
 }
 
+static void ShutdownVoiceClient() {
+    if (g_shutdown_started.exchange(true))
+        return;
+
+    if (g_main_thread && GetThreadId(g_main_thread) != GetCurrentThreadId()) {
+        WaitForSingleObject(g_main_thread, 5000);
+        CloseHandle(g_main_thread);
+        g_main_thread = nullptr;
+    }
+
+    g_at_running.store(false);
+    if (g_at_thread) {
+        WaitForSingleObject(g_at_thread, 35000);
+        CloseHandle(g_at_thread);
+        g_at_thread = nullptr;
+    }
+
+    VoiceClient::get().shutdown();
+    D3D9Hook::uninstall();
+}
+
+extern "C" __declspec(dllexport) void VoiceDetach() {
+    ShutdownVoiceClient();
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpvReserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
         AddVectoredExceptionHandler(1, CrashHandler);
-        CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+        g_main_thread = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     }
     else if (reason == DLL_PROCESS_DETACH) {
         dbglog("DLL_PROCESS_DETACH");
-        // lpvReserved != NULL means process is terminating — OS kills all threads,
-        // joining them here deadlocks or crashes. Skip cleanup in that case.
-        if (lpvReserved == nullptr) {
-            g_at_running.store(false);
-            VoiceClient::get().shutdown();
-            D3D9Hook::uninstall();
-        }
+        // DllMain runs under the loader lock; keep detach non-blocking.
+        // Explicit unloaders should call VoiceDetach() before FreeLibrary.
+        g_at_running.store(false);
     }
     return TRUE;
 }

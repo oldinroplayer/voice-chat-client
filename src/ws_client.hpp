@@ -35,6 +35,7 @@ private:
 
     std::atomic<bool> connected_{ false };
     std::thread       recv_thread_;
+    std::mutex        conn_mtx_;
     std::mutex        send_mtx_; // ป้องกัน send จากหลาย thread พร้อมกัน
 
     void recv_loop();

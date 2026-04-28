@@ -133,6 +133,7 @@ private:
     void on_binary_message(const std::vector<uint8_t>& data);
     void try_send_auth();
 
+    std::thread init_thread_;
     std::thread position_thread_;
     std::atomic<bool> running_{ false };
     std::atomic<bool> reconnecting_{ false };
