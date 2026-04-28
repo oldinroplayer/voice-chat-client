@@ -134,7 +134,9 @@ private:
     void try_send_auth();
 
     std::thread init_thread_;
+    std::thread reconnect_thread_;
     std::thread position_thread_;
+    std::mutex thread_mtx_;
     std::atomic<bool> running_{ false };
     std::atomic<bool> reconnecting_{ false };
     std::atomic<bool> auth_sent_{ false };

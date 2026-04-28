@@ -361,16 +361,25 @@ void VoiceClient::init() {
     reconnecting_ = false;
     init_opus_encoder();
 
-    if (init_thread_.joinable())
-        init_thread_.join();
+    std::thread old_init_thread;
+    {
+        std::lock_guard<std::mutex> lk(thread_mtx_);
+        if (init_thread_.joinable())
+            old_init_thread = std::move(init_thread_);
+    }
+    if (old_init_thread.joinable())
+        old_init_thread.join();
 
+    std::lock_guard<std::mutex> lk(thread_mtx_);
     init_thread_ = std::thread([this]{
         dbglog("bg: connect_to_server start");
         connect_to_server();
         dbglog("bg: connect_to_server done");
         if (!running_.load()) return;
 
-        if (!position_thread_.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(thread_mtx_);
+            if (position_thread_.joinable()) return;
             dbglog("bg: starting position_thread");
             position_thread_ = std::thread([this]{ position_loop(); });
         }
@@ -396,9 +405,23 @@ void VoiceClient::init() {
 }
 
 void VoiceClient::shutdown() {
+    std::thread init_to_join;
+    std::thread reconnect_to_join;
+    std::thread position_to_join;
+    {
+        std::lock_guard<std::mutex> lk(thread_mtx_);
+        if (init_thread_.joinable())
+            init_to_join = std::move(init_thread_);
+        if (reconnect_thread_.joinable())
+            reconnect_to_join = std::move(reconnect_thread_);
+        if (position_thread_.joinable())
+            position_to_join = std::move(position_thread_);
+    }
+
     if (!running_.exchange(false) &&
-        !init_thread_.joinable() &&
-        !position_thread_.joinable())
+        !init_to_join.joinable() &&
+        !reconnect_to_join.joinable() &&
+        !position_to_join.joinable())
         return;
 
     reconnecting_   = false;
@@ -408,11 +431,14 @@ void VoiceClient::shutdown() {
 
     ws_.disconnect();
 
-    if (init_thread_.joinable())
-        init_thread_.join();
+    if (init_to_join.joinable())
+        init_to_join.join();
 
-    if (position_thread_.joinable())
-        position_thread_.join();
+    if (reconnect_to_join.joinable())
+        reconnect_to_join.join();
+
+    if (position_to_join.joinable())
+        position_to_join.join();
 
     capture_.stop();
     playback_.stop_all();
@@ -465,7 +491,22 @@ void VoiceClient::on_ws_closed() {
     bool expected = false;
     if (!reconnecting_.compare_exchange_strong(expected, true)) return;
     dbglog("[ws] disconnected — starting reconnect loop");
-    std::thread(&VoiceClient::reconnect_loop, this).detach();
+    std::thread old_reconnect_thread;
+    {
+        std::lock_guard<std::mutex> lk(thread_mtx_);
+        if (reconnect_thread_.joinable())
+            old_reconnect_thread = std::move(reconnect_thread_);
+    }
+    if (old_reconnect_thread.joinable())
+        old_reconnect_thread.join();
+    if (!running_) {
+        reconnecting_ = false;
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(thread_mtx_);
+        reconnect_thread_ = std::thread(&VoiceClient::reconnect_loop, this);
+    }
 }
 
 void VoiceClient::reconnect_loop() {
@@ -509,6 +550,10 @@ void VoiceClient::connect_to_server() {
 
     dbglog(ok ? "ws_.connect OK" : "ws_.connect FAILED (voice-server not running?)");
     if (!ok) return;
+    if (!running_.load()) {
+        ws_.disconnect();
+        return;
+    }
 
     auth_sent_      = false;
     auth_confirmed_ = false;
