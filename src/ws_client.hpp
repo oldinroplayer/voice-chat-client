@@ -1,13 +1,13 @@
 #pragma once
 #include <Windows.h>
-#include <winhttp.h>
 #include <string>
 #include <vector>
 #include <functional>
 #include <thread>
 #include <atomic>
 #include <mutex>
-#pragma comment(lib, "winhttp.lib")
+
+using INTERNET_PORT = unsigned short;
 
 using WsTextCallback   = std::function<void(const std::string&)>;
 using WsBinaryCallback = std::function<void(const std::vector<uint8_t>&)>;
@@ -28,10 +28,7 @@ public:
     WsCloseCallback  on_close;
 
 private:
-    HINTERNET session_   = nullptr;
-    HINTERNET connect_   = nullptr;
-    HINTERNET request_   = nullptr;
-    HINTERNET websocket_ = nullptr;
+    UINT_PTR socket_ = ~static_cast<UINT_PTR>(0);
 
     std::atomic<bool> connected_{ false };
     std::thread       recv_thread_;

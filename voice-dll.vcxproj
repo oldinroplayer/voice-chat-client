@@ -55,7 +55,7 @@
       <ExceptionHandling>Async</ExceptionHandling>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>d3d9.lib;winhttp.lib;ole32.lib;avrt.lib;winmm.lib;shlwapi.lib;iphlpapi.lib;$(ProjectDir)vendor\opus\lib\x86\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d9.lib;ws2_32.lib;ole32.lib;avrt.lib;winmm.lib;shlwapi.lib;iphlpapi.lib;$(ProjectDir)vendor\opus\lib\x86\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -69,7 +69,7 @@
       <ExceptionHandling>Async</ExceptionHandling>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>d3d9.lib;winhttp.lib;ole32.lib;avrt.lib;winmm.lib;shlwapi.lib;iphlpapi.lib;$(ProjectDir)vendor\opus\lib\x86\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d9.lib;ws2_32.lib;ole32.lib;avrt.lib;winmm.lib;shlwapi.lib;iphlpapi.lib;$(ProjectDir)vendor\opus\lib\x86\opus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 

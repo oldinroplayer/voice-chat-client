@@ -994,7 +994,7 @@ void VoiceClient::position_loop() {
         // ── Drain outgoing WS queue ───────────────────────────────────────
         // D3D9 / UI thread pushes messages here instead of calling
         // ws_.send_text() directly, so the game render thread never blocks
-        // on WinHTTP I/O.  We drain here under no lock — safe because only
+        // on network I/O.  We drain here under no lock — safe because only
         // position_loop calls ws_.send_text() (recv_thread only receives).
         {
             std::vector<std::string> pending;
@@ -1064,7 +1064,7 @@ void VoiceClient::position_loop() {
             // We deliberately do NOT call ws_.disconnect() here. Doing so from
             // position_loop races with recv_thread, which may be simultaneously
             // handling a close frame from the server's own auth_revoke kick —
-            // both threads touching the same WinHTTP handles → heap corruption
+            // both threads touching the same connection handles → heap corruption
             // → game crash.
             //
             // Instead we let the server be the sole authority:

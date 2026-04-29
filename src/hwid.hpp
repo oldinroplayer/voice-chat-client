@@ -4,7 +4,7 @@
 //   2. System volume serial number (C:\)
 //   3. First non-virtual physical MAC address
 //
-// The result is included in every "auth" WebSocket message so the server
+// The result is included in every "auth" voice message so the server
 // can bind each authorized character to a specific machine.  An attacker
 // who extracts the DLL binary cannot authenticate with a different machine
 // unless the server explicitly allows it.

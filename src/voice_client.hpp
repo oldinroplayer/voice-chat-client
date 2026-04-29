@@ -167,7 +167,7 @@ private:
 
     // Thread-safe outgoing WS message queue.
     // D3D9 / UI thread pushes here; position_loop drains on its own thread
-    // so the game render thread never blocks on WinHTTP network I/O.
+    // so the game render thread never blocks on network I/O.
     std::mutex              ws_send_queue_mtx_;
     std::vector<std::string> ws_send_queue_;
     void enqueue_ws_send(std::string msg);

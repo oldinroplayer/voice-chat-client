@@ -1,239 +1,237 @@
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include "ws_client.hpp"
 #include "dbglog.hpp"
-#include "obf_string.hpp"
-#include <vector>
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 
 namespace {
 
-std::wstring default_user_agent() {
-    constexpr unsigned char k = 0x33u;
-    constexpr std::array<unsigned char, 12> enc = {
-        0x61, 0x7c, 0x1e, 0x65, 0x5c, 0x5a, 0x50, 0x56, 0x1c, 0x02, 0x1d, 0x03
-    };
-    return obf::decode_wide<enc.size(), k>(enc);
+constexpr uint16_t RAW_MAGIC = 0x5654; // "VT"
+constexpr uint8_t RAW_VERSION = 1;
+constexpr uint32_t RAW_MAX_PAYLOAD = 1024 * 1024;
+
+enum class RawPacketType : uint8_t {
+    Text = 1,
+    Binary = 2,
+    Close = 3
+};
+
+static void write_u16_be(uint8_t* p, uint16_t v) {
+    p[0] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    p[1] = static_cast<uint8_t>(v & 0xFF);
+}
+
+static void write_u32_be(uint8_t* p, uint32_t v) {
+    p[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    p[1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+    p[2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    p[3] = static_cast<uint8_t>(v & 0xFF);
+}
+
+static uint16_t read_u16_be(const uint8_t* p) {
+    return static_cast<uint16_t>((p[0] << 8) | p[1]);
+}
+
+static uint32_t read_u32_be(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24) |
+           (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) |
+           static_cast<uint32_t>(p[3]);
+}
+
+static std::string wide_to_utf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return {};
+    std::string out(static_cast<size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+static bool send_all(SOCKET s, const uint8_t* data, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        int n = ::send(s, reinterpret_cast<const char*>(data + sent),
+                       static_cast<int>(std::min<size_t>(len - sent, 64 * 1024)), 0);
+        if (n <= 0) return false;
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+static bool recv_all(SOCKET s, uint8_t* data, size_t len) {
+    size_t got = 0;
+    while (got < len) {
+        int n = ::recv(s, reinterpret_cast<char*>(data + got),
+                       static_cast<int>(std::min<size_t>(len - got, 64 * 1024)), 0);
+        if (n <= 0) return false;
+        got += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+static bool send_frame(SOCKET s, RawPacketType type, const uint8_t* data, uint32_t len) {
+    std::vector<uint8_t> frame(8 + len);
+    write_u16_be(frame.data(), RAW_MAGIC);
+    frame[2] = RAW_VERSION;
+    frame[3] = static_cast<uint8_t>(type);
+    write_u32_be(frame.data() + 4, len);
+    if (len && data)
+        std::memcpy(frame.data() + 8, data, len);
+    return send_all(s, frame.data(), frame.size());
 }
 
 }
 
-bool WsClient::connect(const std::wstring& host, INTERNET_PORT port, const std::wstring& path) {
+bool WsClient::connect(const std::wstring& host, INTERNET_PORT port, const std::wstring&) {
     std::lock_guard<std::mutex> conn_lock(conn_mtx_);
 
-    // Clean up any leftover handles from previous connection before reconnecting.
-    // Do not free the websocket handle until recv_thread has left WinHTTP.
     connected_ = false;
-    HINTERNET old_ws = nullptr;
+    SOCKET old_socket = INVALID_SOCKET;
     {
         std::lock_guard<std::mutex> send_lock(send_mtx_);
-        old_ws = websocket_;
-        if (old_ws)
-            WinHttpWebSocketClose(old_ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+        old_socket = socket_;
+        socket_ = INVALID_SOCKET;
+        if (old_socket != INVALID_SOCKET)
+            shutdown(old_socket, SD_BOTH);
     }
-    if (recv_thread_.joinable()) recv_thread_.join();
+    if (recv_thread_.joinable())
+        recv_thread_.join();
+    if (old_socket != INVALID_SOCKET)
+        closesocket(old_socket);
+
+    WSADATA wsa{};
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        dbglog("[rawtcp] WSAStartup FAILED");
+        return false;
+    }
+
+    const std::string host8 = wide_to_utf8(host);
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* result = nullptr;
+    const std::string port_s = std::to_string(port);
+    if (getaddrinfo(host8.c_str(), port_s.c_str(), &hints, &result) != 0 || !result) {
+        dbglog("[rawtcp] getaddrinfo FAILED");
+        WSACleanup();
+        return false;
+    }
+
+    SOCKET s = INVALID_SOCKET;
+    for (addrinfo* ptr = result; ptr; ptr = ptr->ai_next) {
+        s = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
+        if (s == INVALID_SOCKET)
+            continue;
+        if (::connect(s, ptr->ai_addr, static_cast<int>(ptr->ai_addrlen)) == 0)
+            break;
+        closesocket(s);
+        s = INVALID_SOCKET;
+    }
+    freeaddrinfo(result);
+
+    if (s == INVALID_SOCKET) {
+        dbglog("[rawtcp] connect FAILED");
+        WSACleanup();
+        return false;
+    }
+
     {
         std::lock_guard<std::mutex> send_lock(send_mtx_);
-        websocket_ = nullptr;
-    }
-    if (old_ws)     WinHttpCloseHandle(old_ws);
-    if (request_)   { WinHttpCloseHandle(request_);   request_   = nullptr; }
-    if (connect_)   { WinHttpCloseHandle(connect_);   connect_   = nullptr; }
-    if (session_)   { WinHttpCloseHandle(session_);   session_   = nullptr; }
-
-    dbglog("WinHttpOpen");
-    const std::wstring user_agent = default_user_agent();
-    session_ = WinHttpOpen(user_agent.c_str(),
-                           WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                           WINHTTP_NO_PROXY_NAME,
-                           WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!session_) { dbglog("WinHttpOpen FAILED"); return false; }
-
-    DWORD timeout = 3000;
-    WinHttpSetOption(session_, WINHTTP_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-    WinHttpSetOption(session_, WINHTTP_OPTION_SEND_TIMEOUT,    &timeout, sizeof(timeout));
-    WinHttpSetOption(session_, WINHTTP_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-
-    dbglog("WinHttpConnect");
-    connect_ = WinHttpConnect(session_, host.c_str(), port, 0);
-    if (!connect_) { dbglog("WinHttpConnect FAILED"); return false; }
-
-    dbglog("WinHttpOpenRequest");
-    request_ = WinHttpOpenRequest(connect_, L"GET", path.c_str(),
-                                  nullptr, nullptr, nullptr, 0);
-    if (!request_) { dbglog("WinHttpOpenRequest FAILED"); return false; }
-
-    dbglog("WinHttpSetOption UPGRADE");
-    WinHttpSetOption(request_, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0);
-
-    dbglog("WinHttpSendRequest calling...");
-    BOOL sendOk = WinHttpSendRequest(request_, nullptr, 0, nullptr, 0, 0, 0);
-    if (!sendOk) {
-        char errbuf[64];
-        sprintf_s(errbuf, "WinHttpSendRequest FAILED err=%lu", GetLastError());
-        dbglog(errbuf);
-        return false;
-    }
-    dbglog("WinHttpSendRequest OK");
-
-    dbglog("WinHttpReceiveResponse");
-    if (!WinHttpReceiveResponse(request_, nullptr)) {
-        dbglog("WinHttpReceiveResponse FAILED");
-        return false;
+        socket_ = s;
+        connected_ = true;
     }
 
-    DWORD statusCode = 0;
-    DWORD statusSize = sizeof(statusCode);
-    WinHttpQueryHeaders(request_,
-        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX,
-        &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
-
-    char scbuf[64];
-    sprintf_s(scbuf, "HTTP status: %lu", statusCode);
-    dbglog(scbuf);
-
-    if (statusCode != 101) {
-        dbglog("Not 101 — voice-server not running?");
-        return false;
-    }
-
-    dbglog("WinHttpWebSocketCompleteUpgrade");
-    websocket_ = WinHttpWebSocketCompleteUpgrade(request_, 0);
-    if (!websocket_) {
-        dbglog("WinHttpWebSocketCompleteUpgrade FAILED");
-        return false;
-    }
-
-    dbglog("WinHttpCloseHandle request");
-    WinHttpCloseHandle(request_);
-    request_ = nullptr;
-
-    connected_ = true;
-
-    dbglog("start recv_thread");
-    recv_thread_ = std::thread([this]{ recv_loop(); });
-    dbglog("connect done");
+    dbglog("[rawtcp] connect OK");
+    recv_thread_ = std::thread([this] { recv_loop(); });
     return true;
 }
 
 void WsClient::recv_loop() {
-    {
-        char b[48];
-        sprintf_s(b, "[recv] loop started tid=%lu", GetCurrentThreadId());
-        dbglog(b);
-    }
-
-    std::vector<uint8_t> buf(64 * 1024);
-    DWORD bytes_read = 0;
-    WINHTTP_WEB_SOCKET_BUFFER_TYPE buf_type;
+    dbglog("[rawtcp] recv loop started");
 
     while (connected_) {
-        dbglog("[recv] calling WinHttpWebSocketReceive");
-
-        HINTERNET ws = websocket_;
-        if (!ws) break;
-
-        DWORD ret = WinHttpWebSocketReceive(
-            ws, buf.data(), static_cast<DWORD>(buf.size()),
-            &bytes_read, &buf_type);
-
-        if (!connected_) break;
-
-        if (ret != ERROR_SUCCESS) {
-            char errbuf[64];
-            sprintf_s(errbuf, "[recv] receive error=%lu", ret);
-            dbglog(errbuf);
-
-            connected_ = false;
-            if (on_close) on_close();
+        SOCKET s = socket_;
+        if (s == INVALID_SOCKET)
             break;
-        }
 
-        dbglog("[recv] got message");
+        uint8_t header[8] = {};
+        if (!recv_all(s, header, sizeof(header)))
+            break;
+        if (read_u16_be(header) != RAW_MAGIC || header[2] != RAW_VERSION)
+            break;
 
-        if (buf_type == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE) {
-            dbglog("[recv] text message");
-            if (on_text) {
-                std::string msg(reinterpret_cast<char*>(buf.data()), bytes_read);
-                on_text(msg);
-            }
-        }
-        else if (buf_type == WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE) {
-            if (on_binary) {
-                std::vector<uint8_t> data(buf.begin(), buf.begin() + bytes_read);
-                on_binary(data);
-            }
-        }
-        else if (buf_type == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) {
-            dbglog("[recv] close frame");
-            connected_ = false;
-            if (on_close) on_close();
+        const auto type = static_cast<RawPacketType>(header[3]);
+        const uint32_t len = read_u32_be(header + 4);
+        if (len > RAW_MAX_PAYLOAD)
+            break;
+
+        std::vector<uint8_t> payload(len);
+        if (len && !recv_all(s, payload.data(), len))
+            break;
+
+        if (type == RawPacketType::Text) {
+            if (on_text)
+                on_text(std::string(reinterpret_cast<const char*>(payload.data()), payload.size()));
+        } else if (type == RawPacketType::Binary) {
+            if (on_binary)
+                on_binary(payload);
+        } else if (type == RawPacketType::Close) {
             break;
         }
     }
 
-    dbglog("[recv] loop ended");
+    if (connected_.exchange(false)) {
+        if (on_close)
+            on_close();
+    }
+
+    dbglog("[rawtcp] recv loop ended");
 }
 
 bool WsClient::send_text(const std::string& msg) {
-    if (!connected_ || !websocket_) return false;
-
     std::lock_guard<std::mutex> lock(send_mtx_);
-    if (!connected_ || !websocket_) return false;
-
-    DWORD ret = WinHttpWebSocketSend(
-        websocket_,
-        WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-        const_cast<void*>(static_cast<const void*>(msg.data())),
-        static_cast<DWORD>(msg.size()));
-
-    return ret == ERROR_SUCCESS;
+    if (!connected_ || socket_ == INVALID_SOCKET)
+        return false;
+    return send_frame(socket_, RawPacketType::Text,
+                      reinterpret_cast<const uint8_t*>(msg.data()),
+                      static_cast<uint32_t>(msg.size()));
 }
 
 bool WsClient::send_binary(const std::vector<uint8_t>& data) {
-    if (!connected_ || !websocket_) return false;
-
     std::lock_guard<std::mutex> lock(send_mtx_);
-    if (!connected_ || !websocket_) return false;
-
-    DWORD ret = WinHttpWebSocketSend(
-        websocket_,
-        WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
-        const_cast<void*>(static_cast<const void*>(data.data())),
-        static_cast<DWORD>(data.size()));
-
-    return ret == ERROR_SUCCESS;
+    if (!connected_ || socket_ == INVALID_SOCKET)
+        return false;
+    return send_frame(socket_, RawPacketType::Binary,
+                      data.data(),
+                      static_cast<uint32_t>(data.size()));
 }
 
 void WsClient::disconnect() {
     std::lock_guard<std::mutex> conn_lock(conn_mtx_);
 
-    bool was_connected = connected_.exchange(false);
-    if (!was_connected && !websocket_ && !request_ && !connect_ && !session_) return;
-
-    dbglog("[ws] disconnect start");
-
-    HINTERNET ws = nullptr;
+    SOCKET s = INVALID_SOCKET;
     {
         std::lock_guard<std::mutex> lock(send_mtx_);
-        ws = websocket_;
-        if (ws) {
-            WinHttpWebSocketClose(ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
+        connected_ = false;
+        s = socket_;
+        socket_ = INVALID_SOCKET;
+        if (s != INVALID_SOCKET) {
+            send_frame(s, RawPacketType::Close, nullptr, 0);
+            shutdown(s, SD_BOTH);
         }
     }
 
-    if (recv_thread_.joinable()) {
+    if (recv_thread_.joinable())
         recv_thread_.join();
-    }
 
-    // Hold send_mtx_ before nulling/freeing the handle so any send() that passed
-    // the inner connected_ check while holding the lock can finish before we free.
-    {
-        std::lock_guard<std::mutex> lock(send_mtx_);
-        websocket_ = nullptr;
-    }
-    if (ws)       WinHttpCloseHandle(ws);
-    if (request_) { WinHttpCloseHandle(request_); request_ = nullptr; }
-    if (connect_) { WinHttpCloseHandle(connect_); connect_ = nullptr; }
-    if (session_) { WinHttpCloseHandle(session_); session_ = nullptr; }
+    if (s != INVALID_SOCKET)
+        closesocket(s);
+    WSACleanup();
 
-    dbglog("[ws] disconnect done");
+    dbglog("[rawtcp] disconnect done");
 }
